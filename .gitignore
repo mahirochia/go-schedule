@@ -1,3 +1,8 @@
 .idea
 frontend/dist
 frontend/node_modules
+
+# 生成的 Swagger 文档
+docs/swagger/
+docs/api/
+docs/index.html

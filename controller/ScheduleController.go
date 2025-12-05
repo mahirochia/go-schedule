@@ -13,6 +13,16 @@ import (
 
 var ScheduleDao = dao.NewScheduleDao()
 
+// Query 查询指定日期的日程列表
+// @Summary      查询日程
+// @Description  根据用户ID和日期查询日程列表
+// @Tags         日程管理
+// @Accept       json
+// @Produce      json
+// @Param        request  body      schedule.QueryReq  true  "查询参数"
+// @Success      200      {object}  system.Response{data=[]schedule.Schedule}
+// @Failure      500      {object}  system.Response
+// @Router       /schedule/query [post]
 func Query(c *gin.Context) {
 	req := schedule.QueryReq{}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -31,6 +41,16 @@ func Query(c *gin.Context) {
 	system.Success(scheduleList, "ok", c)
 }
 
+// QueryMonth 查询指定月份的日程列表
+// @Summary      查询月度日程
+// @Description  根据用户ID和年月查询整月的日程列表
+// @Tags         日程管理
+// @Accept       json
+// @Produce      json
+// @Param        request  body      schedule.QueryReq  true  "查询参数"
+// @Success      200      {object}  system.Response{data=[]schedule.Schedule}
+// @Failure      500      {object}  system.Response
+// @Router       /schedule/queryMonth [post]
 func QueryMonth(c *gin.Context) {
 	req := schedule.QueryReq{}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -48,6 +68,16 @@ func QueryMonth(c *gin.Context) {
 	system.Success(scheduleList, "ok", c)
 }
 
+// Store 创建新日程
+// @Summary      创建日程
+// @Description  创建一个新的日程安排
+// @Tags         日程管理
+// @Accept       json
+// @Produce      json
+// @Param        request  body      schedule.StoreReq  true  "日程信息"
+// @Success      200      {object}  system.Response
+// @Failure      500      {object}  system.Response
+// @Router       /schedule/store [post]
 func Store(c *gin.Context) {
 	req := schedule.StoreReq{}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -85,6 +115,16 @@ func Store(c *gin.Context) {
 	system.Success(nil, "ok", c)
 }
 
+// Update 更新日程
+// @Summary      更新日程
+// @Description  更新已存在的日程信息
+// @Tags         日程管理
+// @Accept       json
+// @Produce      json
+// @Param        request  body      schedule.UpdateReq  true  "更新信息"
+// @Success      200      {object}  system.Response
+// @Failure      500      {object}  system.Response
+// @Router       /schedule/update [post]
 func Update(c *gin.Context) {
 	req := schedule.UpdateReq{}
 	if err := c.ShouldBindJSON(&req); err != nil {

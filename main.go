@@ -1,3 +1,20 @@
+// Package main Go Schedule 日程管理系统
+//
+// @title           Go Schedule API
+// @version         1.0
+// @description     一个基于 Go + Vue3 的日程管理系统 API 文档
+// @termsOfService  https://github.com/your-username/go-schedule
+//
+// @contact.name   API Support
+// @contact.url    https://github.com/your-username/go-schedule/issues
+//
+// @license.name  MIT
+// @license.url   https://opensource.org/licenses/MIT
+//
+// @host      localhost:3061
+// @BasePath  /
+//
+// @schemes http https
 package main
 
 import (
