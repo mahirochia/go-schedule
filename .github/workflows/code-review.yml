@@ -176,24 +176,33 @@ jobs:
             const additions = files.reduce((sum, f) => sum + f.additions, 0);
             const deletions = files.reduce((sum, f) => sum + f.deletions, 0);
             
-            const summary = `## 📊 代码审查摘要
+            // 生成文件列表
+            const fileList = files.map(f => {
+              let icon = '📝';
+              if (f.status === 'added') icon = '🆕';
+              if (f.status === 'removed') icon = '🗑️';
+              return '- ' + icon + ' `' + f.filename + '`';
+            }).join('\n');
             
-            | 指标 | 数值 |
-            |------|------|
-            | 📁 修改文件数 | ${files.length} |
-            | ➕ 新增行数 | ${additions} |
-            | ➖ 删除行数 | ${deletions} |
-            | 🐹 Go 文件 | ${goFiles.length} |
-            | 💚 Vue/JS 文件 | ${vueFiles.length} |
+            const summary = [
+              '## 📊 代码审查摘要',
+              '',
+              '| 指标 | 数值 |',
+              '|------|------|',
+              '| 📁 修改文件数 | ' + files.length + ' |',
+              '| ➕ 新增行数 | ' + additions + ' |',
+              '| ➖ 删除行数 | ' + deletions + ' |',
+              '| 🐹 Go 文件 | ' + goFiles.length + ' |',
+              '| 💚 Vue/JS 文件 | ' + vueFiles.length + ' |',
+              '',
+              '### 修改的文件',
+              fileList,
+              '',
+              '---',
+              '✅ 自动化代码审查已完成，请查看上方的检查结果。'
+            ].join('\n');
             
-            ### 修改的文件
-            ${files.map(f => \`- \${f.status === 'added' ? '🆕' : f.status === 'removed' ? '🗑️' : '📝'} \\\`\${f.filename}\\\`\`).join('\n')}
-            
-            ---
-            ✅ 自动化代码审查已完成，请查看上方的检查结果。
-            `;
-            
-            github.rest.issues.createComment({
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
