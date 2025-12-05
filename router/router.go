@@ -26,5 +26,7 @@ func SetupRouter() *gin.Engine {
 		news.POST("/query", controller.QueryNews)
 	}
 
+	r.Group("/agent")
+
 	return r
 }
