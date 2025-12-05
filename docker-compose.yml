@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # MySQL 数据库服务
+  mysql:
+    image: mysql:8.0
+    container_name: go-film-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: FilmSite
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      # 数据持久化
+      - mysql_data:/var/lib/mysql
+      # 初始化脚本
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # MySQL 配置
+      - ./mysql/my.cnf:/etc/mysql/conf.d/my.cnf:ro
+    command: --default-authentication-plugin=mysql_native_password
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Go 后端服务
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: go-film-backend
+    restart: always
+    environment:
+      LISTEN_PORT: "3061"
+      MYSQL_DSN: "root:root123456@(mysql:3306)/FilmSite?charset=utf8mb4&parseTime=True&loc=Local"
+      TZ: Asia/Shanghai
+    ports:
+      - "3061:3061"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  # Nginx 前端服务
+  nginx:
+    image: nginx:alpine
+    container_name: go-film-nginx
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      # 前端静态文件
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      # Nginx 配置
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # 日志持久化
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+# 数据卷定义
+volumes:
+  mysql_data:
+    name: go-film-mysql-data
+  nginx_logs:
+    name: go-film-nginx-logs
+
+# 网络定义
+networks:
+  app-network:
+    name: go-film-network
+    driver: bridge
+
