@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [ main, master ]
 
+# 添加必要的权限
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+  issues: write
+
 jobs:
   # Go 代码静态分析
   golangci-lint:
@@ -34,6 +41,8 @@ jobs:
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
+    # 仅在非 fork 的 PR 或 push 事件时上传 SARIF
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     
     steps:
       - name: Checkout code
@@ -51,10 +60,31 @@ jobs:
           args: '-no-fail -fmt sarif -out results.sarif ./...'
 
       - name: Upload SARIF file
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: results.sarif
+
+  # 安全扫描（Fork PR - 仅输出结果，不上传）
+  security-scan-fork:
+    name: Security Scan (Fork)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: '-no-fail -fmt text ./...'
 
   # 前端代码检查
   frontend-lint:
@@ -123,7 +153,7 @@ jobs:
     name: Review Summary
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    needs: [golangci-lint, security-scan, format-check]
+    needs: [golangci-lint, format-check]
     
     steps:
       - name: Checkout code
@@ -169,4 +199,3 @@ jobs:
               issue_number: context.issue.number,
               body: summary
             });
-
