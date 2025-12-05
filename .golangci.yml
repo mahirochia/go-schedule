@@ -1,0 +1,110 @@
+# golangci-lint 配置文件
+# 文档: https://golangci-lint.run/usage/configuration/
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    # 默认启用的 linter
+    - errcheck      # 检查未处理的错误
+    - gosimple      # 简化代码建议
+    - govet         # 检查可疑代码
+    - ineffassign   # 检查无效赋值
+    - staticcheck   # 静态分析
+    - unused        # 检查未使用的代码
+    
+    # 额外启用的 linter
+    - bodyclose     # 检查 HTTP response body 是否关闭
+    - contextcheck  # 检查 context 使用
+    - dogsled       # 检查过多的空白标识符
+    - dupl          # 检查重复代码
+    - errname       # 检查错误命名
+    - errorlint     # 检查错误处理
+    - exhaustive    # 检查 switch 语句完整性
+    - gocognit      # 检查认知复杂度
+    - goconst       # 检查可以提取为常量的字符串
+    - gocritic      # 代码风格检查
+    - gocyclo       # 检查圈复杂度
+    - gofmt         # 格式化检查
+    - goimports     # import 排序检查
+    - goprintffuncname # printf 函数命名检查
+    - gosec         # 安全检查
+    - misspell      # 拼写检查
+    - nakedret      # 裸返回检查
+    - nilerr        # nil 错误检查
+    - noctx         # HTTP 请求 context 检查
+    - prealloc      # 预分配建议
+    - predeclared   # 预定义标识符检查
+    - revive        # 代码风格检查
+    - sqlclosecheck # SQL 连接关闭检查
+    - stylecheck    # 代码风格检查
+    - unconvert     # 不必要的类型转换检查
+    - unparam       # 未使用参数检查
+    - whitespace    # 空白检查
+
+linters-settings:
+  gocyclo:
+    min-complexity: 15
+  
+  gocognit:
+    min-complexity: 20
+  
+  dupl:
+    threshold: 150
+  
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  
+  misspell:
+    locale: US
+  
+  revive:
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+  
+  gosec:
+    excludes:
+      - G104  # 忽略未检查错误（由 errcheck 处理）
+
+issues:
+  exclude-rules:
+    # 测试文件放宽规则
+    - path: _test\.go
+      linters:
+        - dupl
+        - gosec
+        - goconst
+    
+    # 忽略 main.go 的一些检查
+    - path: main\.go
+      linters:
+        - gochecknoglobals
+    
+    # 忽略生成的文件
+    - path: docs/
+      linters:
+        - all
+
+  max-issues-per-linter: 50
+  max-same-issues: 10
+

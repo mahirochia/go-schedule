@@ -1,0 +1,172 @@
+name: Code Review
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # Go 代码静态分析
+  golangci-lint:
+    name: Go Lint
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+          # 只显示新增代码的问题（PR 时）
+          only-new-issues: true
+
+  # Go 安全扫描
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: '-no-fail -fmt sarif -out results.sarif ./...'
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results.sarif
+
+  # 前端代码检查
+  frontend-lint:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npx eslint src --ext .vue,.js,.ts --format stylish || true
+        continue-on-error: true
+
+  # 代码格式检查
+  format-check:
+    name: Format Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Check Go formatting
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "以下文件需要格式化："
+            gofmt -l .
+            echo ""
+            echo "请运行 'gofmt -w .' 修复格式问题"
+            exit 1
+          fi
+          echo "✅ 所有 Go 文件格式正确"
+
+      - name: Check go mod tidy
+        run: |
+          go mod tidy
+          if ! git diff --quiet go.mod go.sum; then
+            echo "go.mod 或 go.sum 需要更新，请运行 'go mod tidy'"
+            exit 1
+          fi
+          echo "✅ go.mod 和 go.sum 已是最新"
+
+  # PR 自动评论（代码审查摘要）
+  review-summary:
+    name: Review Summary
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: [golangci-lint, security-scan, format-check]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate review summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            
+            const goFiles = files.filter(f => f.filename.endsWith('.go'));
+            const vueFiles = files.filter(f => f.filename.endsWith('.vue') || f.filename.endsWith('.js'));
+            const additions = files.reduce((sum, f) => sum + f.additions, 0);
+            const deletions = files.reduce((sum, f) => sum + f.deletions, 0);
+            
+            const summary = `## 📊 代码审查摘要
+            
+            | 指标 | 数值 |
+            |------|------|
+            | 📁 修改文件数 | ${files.length} |
+            | ➕ 新增行数 | ${additions} |
+            | ➖ 删除行数 | ${deletions} |
+            | 🐹 Go 文件 | ${goFiles.length} |
+            | 💚 Vue/JS 文件 | ${vueFiles.length} |
+            
+            ### 修改的文件
+            ${files.map(f => \`- \${f.status === 'added' ? '🆕' : f.status === 'removed' ? '🗑️' : '📝'} \\\`\${f.filename}\\\`\`).join('\n')}
+            
+            ---
+            ✅ 自动化代码审查已完成，请查看上方的检查结果。
+            `;
+            
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: summary
+            });
+

@@ -1,0 +1,29 @@
+# CODEOWNERS 文件
+# 当这些文件被修改时，自动请求指定的审查者
+# 文档: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# 默认审查者（适用于所有文件）
+* @your-username
+
+# Go 后端代码
+*.go @your-username
+/controller/ @your-username
+/dao/ @your-username
+/model/ @your-username
+/plugin/ @your-username
+/router/ @your-username
+
+# 前端代码
+/frontend/ @your-username
+
+# 配置文件
+/config/ @your-username
+docker-compose.yml @your-username
+Dockerfile @your-username
+
+# CI/CD 配置
+/.github/ @your-username
+
+# 数据库相关
+/mysql/ @your-username
+
