@@ -250,7 +250,7 @@ jobs:
             -d "{
               \"model\": \"deepseek-chat\",
               \"messages\": [
-                {\"role\": \"system\", \"content\": \"你是一个专业的代码审查专家，精通 Go、Vue.js、安全最佳实践。请提供具体、可操作的审查意见。\"},
+                {\"role\": \"system\", \"content\": \"你是一个专业的代码审查专家，精通 Go、Vue.js、安全最佳实践。请提供具体、可操作的审查意见。不要在回复中使用代码块（反引号），直接用文字描述代码修改建议。\"},
                 {\"role\": \"user\", \"content\": $(echo "$PROMPT" | jq -Rs .)}
               ],
               \"max_tokens\": 2000,
@@ -258,22 +258,21 @@ jobs:
             }")
           
           REVIEW=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "AI 审查暂时不可用，请检查 DEEPSEEK_API_KEY 是否配置正确"')
-          echo "review<<EOF" >> $GITHUB_OUTPUT
-          echo "$REVIEW" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # 将审查结果写入文件（避免模板字符串问题）
+          echo "## 🤖 AI 代码审查报告 (DeepSeek)" > ai_review.md
+          echo "" >> ai_review.md
+          echo "$REVIEW" >> ai_review.md
+          echo "" >> ai_review.md
+          echo "---" >> ai_review.md
+          echo "*此审查由 DeepSeek AI 自动生成，仅供参考。*" >> ai_review.md
 
       - name: Post AI review comment
         uses: actions/github-script@v7
         with:
           script: |
-            const review = `${{ steps.ai-review.outputs.review }}`;
-            
-            const body = `## 🤖 AI 代码审查报告 (DeepSeek)
-
-            ${review}
-
-            ---
-            *此审查由 DeepSeek AI 自动生成，仅供参考。*`;
+            const fs = require('fs');
+            const body = fs.readFileSync('ai_review.md', 'utf8');
             
             await github.rest.issues.createComment({
               owner: context.repo.owner,
