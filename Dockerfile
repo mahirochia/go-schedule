@@ -6,6 +6,9 @@ ARG BUILDPLATFORM
 ARG TARGETOS
 ARG TARGETARCH
 
+# 安装时区数据（用于后续复制）
+RUN apk add --no-cache tzdata ca-certificates
+
 # 设置工作目录
 WORKDIR /app
 
@@ -32,11 +35,14 @@ ENV TZ=Asia/Shanghai
 
 WORKDIR /app
 
+# 从构建阶段复制时区数据
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+
+# 从构建阶段复制 CA 证书
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
 # 从构建阶段复制编译好的二进制文件
 COPY --from=builder /app/main .
-
-# 复制时区数据（从 builder 阶段）
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
 # 暴露端口
 EXPOSE 3061
