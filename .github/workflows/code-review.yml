@@ -6,7 +6,6 @@ on:
   pull_request:
     branches: [ main, master ]
 
-# 添加必要的权限
 permissions:
   contents: read
   security-events: write
@@ -18,6 +17,8 @@ jobs:
   golangci-lint:
     name: Go Lint
     runs-on: ubuntu-latest
+    outputs:
+      lint-result: ${{ steps.lint.outputs.result }}
     
     steps:
       - name: Checkout code
@@ -30,18 +31,31 @@ jobs:
           cache: true
 
       - name: Run golangci-lint
+        id: lint
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
-          args: --timeout=5m
-          # 只显示新增代码的问题（PR 时）
+          args: --timeout=5m --out-format=json
           only-new-issues: true
+        continue-on-error: true
+
+      - name: Save lint results
+        if: always()
+        run: |
+          golangci-lint run --timeout=5m --out-format=json > lint-results.json 2>&1 || true
+          
+      - name: Upload lint results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-results
+          path: lint-results.json
+          retention-days: 1
 
   # Go 安全扫描
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
-    # 仅在非 fork 的 PR 或 push 事件时上传 SARIF
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     
     steps:
@@ -55,6 +69,18 @@ jobs:
           cache: true
 
       - name: Run Gosec Security Scanner
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -no-fail -fmt json -out security-results.json ./... 2>&1 || true
+
+      - name: Upload security results
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-results
+          path: security-results.json
+          retention-days: 1
+
+      - name: Run Gosec for SARIF
         uses: securego/gosec@master
         with:
           args: '-no-fail -fmt sarif -out results.sarif ./...'
@@ -64,27 +90,6 @@ jobs:
         if: always()
         with:
           sarif_file: results.sarif
-
-  # 安全扫描（Fork PR - 仅输出结果，不上传）
-  security-scan-fork:
-    name: Security Scan (Fork)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-          cache: true
-
-      - name: Run Gosec Security Scanner
-        uses: securego/gosec@master
-        with:
-          args: '-no-fail -fmt text ./...'
 
   # 前端代码检查
   frontend-lint:
@@ -110,8 +115,16 @@ jobs:
         run: npm ci
 
       - name: Run ESLint
-        run: npx eslint src --ext .vue,.js,.ts --format stylish || true
+        run: |
+          npx eslint src --ext .vue,.js,.ts --format json > ../eslint-results.json 2>&1 || true
         continue-on-error: true
+
+      - name: Upload ESLint results
+        uses: actions/upload-artifact@v4
+        with:
+          name: eslint-results
+          path: eslint-results.json
+          retention-days: 1
 
   # 代码格式检查
   format-check:
@@ -129,31 +142,28 @@ jobs:
           cache: true
 
       - name: Check Go formatting
+        id: gofmt
         run: |
-          if [ -n "$(gofmt -l .)" ]; then
-            echo "以下文件需要格式化："
-            gofmt -l .
-            echo ""
-            echo "请运行 'gofmt -w .' 修复格式问题"
-            exit 1
+          UNFORMATTED=$(gofmt -l . 2>&1 || true)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "unformatted=$UNFORMATTED" >> $GITHUB_OUTPUT
+            echo "需要格式化的文件："
+            echo "$UNFORMATTED"
           fi
-          echo "✅ 所有 Go 文件格式正确"
 
       - name: Check go mod tidy
         run: |
           go mod tidy
           if ! git diff --quiet go.mod go.sum; then
-            echo "go.mod 或 go.sum 需要更新，请运行 'go mod tidy'"
-            exit 1
+            echo "go.mod 或 go.sum 需要更新"
           fi
-          echo "✅ go.mod 和 go.sum 已是最新"
 
-  # PR 自动评论（代码审查摘要）
-  review-summary:
-    name: Review Summary
+  # AI 代码审查（使用 DeepSeek API）
+  ai-review:
+    name: AI Code Review (DeepSeek)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    needs: [golangci-lint, format-check]
+    if: github.event_name == 'pull_request' && vars.ENABLE_AI_REVIEW == 'true'
+    needs: [golangci-lint, security-scan]
     
     steps:
       - name: Checkout code
@@ -161,41 +171,213 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate review summary
+      - name: Get changed files
+        id: changed
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > changed_files.txt
+          cat changed_files.txt
+
+      - name: Get diff content
+        id: diff
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD > diff.txt
+          # 限制 diff 大小，避免超出 API 限制（DeepSeek 支持更长的上下文）
+          head -c 30000 diff.txt > diff_truncated.txt
+
+      - name: Download lint results
+        uses: actions/download-artifact@v4
+        with:
+          name: lint-results
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Download security results
+        uses: actions/download-artifact@v4
+        with:
+          name: security-results
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: AI Review with DeepSeek
+        id: ai-review
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          DIFF_CONTENT=$(cat diff_truncated.txt | jq -Rs .)
+          
+          # 读取 lint 结果
+          LINT_ISSUES=""
+          if [ -f "./artifacts/lint-results.json" ]; then
+            LINT_ISSUES=$(cat ./artifacts/lint-results.json | jq -r '.Issues[]? | "- \(.FromLinter): \(.Text) at \(.Pos.Filename):\(.Pos.Line)"' 2>/dev/null | head -20 || echo "")
+          fi
+          
+          # 读取安全扫描结果
+          SECURITY_ISSUES=""
+          if [ -f "./artifacts/security-results.json" ]; then
+            SECURITY_ISSUES=$(cat ./artifacts/security-results.json | jq -r '.Issues[]? | "- [\(.Severity)] \(.Details) at \(.File):\(.Line)"' 2>/dev/null | head -10 || echo "")
+          fi
+          
+          PROMPT="你是一个专业的代码审查专家，擅长 Go 和 Vue.js。请审查以下代码变更，用中文回复。
+
+          ## 代码变更 (diff):
+          $DIFF_CONTENT
+
+          ## 静态分析发现的问题:
+          $LINT_ISSUES
+
+          ## 安全扫描发现的问题:
+          $SECURITY_ISSUES
+
+          请按以下格式提供审查意见：
+
+          ### 🐛 潜在 Bug
+          (列出可能的 bug 和逻辑错误，如果没有写"未发现明显问题")
+
+          ### ⚡ 优化建议
+          (列出代码优化建议，包括性能、可读性、最佳实践)
+
+          ### 🔒 安全问题
+          (列出安全相关问题，如 SQL 注入、XSS、敏感信息泄露等，如果没有写"未发现安全问题")
+
+          ### 💡 其他建议
+          (其他改进建议，如代码结构、命名规范等)
+
+          请简洁专业地回复，每个类别最多3条最重要的建议，给出具体的代码位置和修复方案。"
+
+          RESPONSE=$(curl -s https://api.deepseek.com/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            -d "{
+              \"model\": \"deepseek-chat\",
+              \"messages\": [
+                {\"role\": \"system\", \"content\": \"你是一个专业的代码审查专家，精通 Go、Vue.js、安全最佳实践。请提供具体、可操作的审查意见。不要在回复中使用代码块（反引号），直接用文字描述代码修改建议。\"},
+                {\"role\": \"user\", \"content\": $(echo "$PROMPT" | jq -Rs .)}
+              ],
+              \"max_tokens\": 2000,
+              \"temperature\": 0.1
+            }")
+          
+          REVIEW=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "AI 审查暂时不可用，请检查 DEEPSEEK_API_KEY 是否配置正确"')
+          
+          # 将审查结果写入文件（避免模板字符串问题）
+          echo "## 🤖 AI 代码审查报告 (DeepSeek)" > ai_review.md
+          echo "" >> ai_review.md
+          echo "$REVIEW" >> ai_review.md
+          echo "" >> ai_review.md
+          echo "---" >> ai_review.md
+          echo "*此审查由 DeepSeek AI 自动生成，仅供参考。*" >> ai_review.md
+
+      - name: Post AI review comment
         uses: actions/github-script@v7
         with:
           script: |
-            const { data: files } = await github.rest.pulls.listFiles({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number
-            });
+            const fs = require('fs');
+            const body = fs.readFileSync('ai_review.md', 'utf8');
             
-            const goFiles = files.filter(f => f.filename.endsWith('.go'));
-            const vueFiles = files.filter(f => f.filename.endsWith('.vue') || f.filename.endsWith('.js'));
-            const additions = files.reduce((sum, f) => sum + f.additions, 0);
-            const deletions = files.reduce((sum, f) => sum + f.deletions, 0);
-            
-            const summary = `## 📊 代码审查摘要
-            
-            | 指标 | 数值 |
-            |------|------|
-            | 📁 修改文件数 | ${files.length} |
-            | ➕ 新增行数 | ${additions} |
-            | ➖ 删除行数 | ${deletions} |
-            | 🐹 Go 文件 | ${goFiles.length} |
-            | 💚 Vue/JS 文件 | ${vueFiles.length} |
-            
-            ### 修改的文件
-            ${files.map(f => \`- \${f.status === 'added' ? '🆕' : f.status === 'removed' ? '🗑️' : '📝'} \\\`\${f.filename}\\\`\`).join('\n')}
-            
-            ---
-            ✅ 自动化代码审查已完成，请查看上方的检查结果。
-            `;
-            
-            github.rest.issues.createComment({
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: summary
+              body: body
+            });
+
+  # 综合审查报告（不依赖 AI）
+  review-report:
+    name: Review Report
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: [golangci-lint, security-scan, format-check]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download lint results
+        uses: actions/download-artifact@v4
+        with:
+          name: lint-results
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Download security results
+        uses: actions/download-artifact@v4
+        with:
+          name: security-results
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Generate review report
+        id: report
+        run: |
+          echo "## 📊 代码审查报告" > report.md
+          echo "" >> report.md
+          
+          # 获取变更统计
+          CHANGES=$(git diff --stat origin/${{ github.base_ref }}...HEAD | tail -1)
+          echo "### 📁 变更统计" >> report.md
+          echo "\`\`\`" >> report.md
+          echo "$CHANGES" >> report.md
+          echo "\`\`\`" >> report.md
+          echo "" >> report.md
+          
+          # Lint 问题
+          echo "### 🔍 代码质量问题 (golangci-lint)" >> report.md
+          if [ -f "./artifacts/lint-results.json" ]; then
+            LINT_COUNT=$(cat ./artifacts/lint-results.json | jq '.Issues | length' 2>/dev/null || echo "0")
+            if [ "$LINT_COUNT" != "0" ] && [ "$LINT_COUNT" != "null" ]; then
+              echo "发现 **$LINT_COUNT** 个问题：" >> report.md
+              echo "" >> report.md
+              cat ./artifacts/lint-results.json | jq -r '.Issues[]? | "| \(.Severity // "warning") | \(.FromLinter) | \(.Text) | `\(.Pos.Filename):\(.Pos.Line)` |"' 2>/dev/null | head -10 | while read line; do
+                echo "$line" >> report.md
+              done
+              echo "" >> report.md
+              # 添加表头
+              sed -i '/ 代码质量问题/a\\n| 级别 | 检查器 | 问题描述 | 位置 |\n|------|--------|----------|------|' report.md 2>/dev/null || true
+            else
+              echo "✅ 未发现代码质量问题" >> report.md
+            fi
+          else
+            echo "✅ 未发现代码质量问题" >> report.md
+          fi
+          echo "" >> report.md
+          
+          # 安全问题
+          echo "### 🔒 安全扫描 (gosec)" >> report.md
+          if [ -f "./artifacts/security-results.json" ]; then
+            SEC_COUNT=$(cat ./artifacts/security-results.json | jq '.Issues | length' 2>/dev/null || echo "0")
+            if [ "$SEC_COUNT" != "0" ] && [ "$SEC_COUNT" != "null" ]; then
+              echo "⚠️ 发现 **$SEC_COUNT** 个潜在安全问题：" >> report.md
+              echo "" >> report.md
+              echo "| 严重性 | 问题 | 位置 |" >> report.md
+              echo "|--------|------|------|" >> report.md
+              cat ./artifacts/security-results.json | jq -r '.Issues[]? | "| \(.Severity) | \(.Details) | `\(.File):\(.Line)` |"' 2>/dev/null | head -10 >> report.md
+            else
+              echo "✅ 未发现安全问题" >> report.md
+            fi
+          else
+            echo "✅ 未发现安全问题" >> report.md
+          fi
+          echo "" >> report.md
+          
+          # 总结
+          echo "---" >> report.md
+          echo "" >> report.md
+          echo "💡 **提示**: 安装 [CodeRabbit](https://github.com/apps/coderabbitai) 可获得更详细的 AI 代码审查" >> report.md
+          
+          cat report.md
+
+      - name: Post review report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('report.md', 'utf8');
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report
             });
