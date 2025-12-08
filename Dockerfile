@@ -1,5 +1,5 @@
 # 构建阶段
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
