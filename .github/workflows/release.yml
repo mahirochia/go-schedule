@@ -1,5 +1,6 @@
-name: Release
+name: Manual Release
 
+# 手动创建 tag 时触发（作为自动发布的备用方案）
 on:
   push:
     tags:
@@ -10,10 +11,33 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # 检查是否已有 Release（避免与 auto-release 重复）
+  check-release:
+    name: Check Existing Release
+    runs-on: ubuntu-latest
+    outputs:
+      exists: ${{ steps.check.outputs.exists }}
+    
+    steps:
+      - name: Check if release exists
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          if gh release view "$TAG_NAME" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "Release $TAG_NAME already exists"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Release $TAG_NAME does not exist"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
   # 构建并推送 Docker 镜像
   build-and-push:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
+    needs: check-release
     permissions:
       contents: read
       packages: write
@@ -54,11 +78,12 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
 
-  # 创建 GitHub Release
+  # 创建 GitHub Release（仅在不存在时）
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: [check-release, build-and-push]
+    if: needs.check-release.outputs.exists == 'false'
     permissions:
       contents: write
 
@@ -70,4 +95,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-

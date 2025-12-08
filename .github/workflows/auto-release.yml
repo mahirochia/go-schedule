@@ -1,0 +1,252 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [ main, master ]
+  # 也可以手动触发
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: '版本类型'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    # 只在 PR 合并或直接推送时运行（跳过 tag 推送）
+    if: "!startsWith(github.ref, 'refs/tags/')"
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get latest tag
+        id: get_latest_tag
+        run: |
+          # 获取最新的 tag
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Latest tag: $LATEST_TAG"
+
+      - name: Calculate next version
+        id: calc_version
+        env:
+          MANUAL_VERSION_TYPE: ${{ github.event.inputs.version_type }}
+        run: |
+          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
+          
+          # 解析当前版本号
+          VERSION=${LATEST_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+          
+          echo "Current version: $MAJOR.$MINOR.$PATCH"
+          
+          # 确定版本类型
+          if [ "$MANUAL_VERSION_TYPE" != "" ] && [ "$MANUAL_VERSION_TYPE" != "auto" ]; then
+            VERSION_TYPE="$MANUAL_VERSION_TYPE"
+            echo "Using manual version type: $VERSION_TYPE"
+          else
+            # 自动检测：分析自上次 tag 以来的 commit 消息
+            COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
+            
+            VERSION_TYPE="patch"  # 默认 patch
+            
+            # 检查是否有 breaking change
+            if echo "$COMMITS" | grep -qiE "^(feat|fix|refactor|perf|style|docs|test|chore)(\(.+\))?!:|BREAKING CHANGE"; then
+              VERSION_TYPE="major"
+              echo "Detected BREAKING CHANGE -> major"
+            # 检查是否有新功能
+            elif echo "$COMMITS" | grep -qiE "^feat(\(.+\))?:"; then
+              VERSION_TYPE="minor"
+              echo "Detected feat -> minor"
+            # 检查是否有修复或其他变更
+            elif echo "$COMMITS" | grep -qiE "^(fix|refactor|perf|style|docs|test|chore)(\(.+\))?:"; then
+              VERSION_TYPE="patch"
+              echo "Detected fix/other -> patch"
+            fi
+            
+            echo "Auto-detected version type: $VERSION_TYPE"
+          fi
+          
+          # 计算新版本号
+          case $VERSION_TYPE in
+            major)
+              NEW_MAJOR=$((MAJOR + 1))
+              NEW_VERSION="$NEW_MAJOR.0.0"
+              ;;
+            minor)
+              NEW_MINOR=$((MINOR + 1))
+              NEW_VERSION="$MAJOR.$NEW_MINOR.0"
+              ;;
+            patch)
+              NEW_PATCH=$((PATCH + 1))
+              NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+              ;;
+          esac
+          
+          NEW_TAG="v$NEW_VERSION"
+          echo "New version: $NEW_TAG"
+          
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "version_type=$VERSION_TYPE" >> $GITHUB_OUTPUT
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+            echo "Tag $NEW_TAG already exists"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Tag $NEW_TAG does not exist"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate changelog
+        id: changelog
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
+          
+          echo "## 更新内容" > changelog.md
+          echo "" >> changelog.md
+          
+          # 获取 commits 并分类
+          if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
+            COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=format:"- %s (%h)" 2>/dev/null)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" -20)
+          fi
+          
+          # 分类整理
+          FEATURES=$(echo "$COMMITS" | grep -iE "^- feat" || true)
+          FIXES=$(echo "$COMMITS" | grep -iE "^- fix" || true)
+          OTHERS=$(echo "$COMMITS" | grep -viE "^- (feat|fix)" || true)
+          
+          if [ -n "$FEATURES" ]; then
+            echo "### ✨ 新功能" >> changelog.md
+            echo "$FEATURES" >> changelog.md
+            echo "" >> changelog.md
+          fi
+          
+          if [ -n "$FIXES" ]; then
+            echo "### 🐛 Bug 修复" >> changelog.md
+            echo "$FIXES" >> changelog.md
+            echo "" >> changelog.md
+          fi
+          
+          if [ -n "$OTHERS" ]; then
+            echo "### 📝 其他更新" >> changelog.md
+            echo "$OTHERS" >> changelog.md
+            echo "" >> changelog.md
+          fi
+          
+          echo "---" >> changelog.md
+          echo "" >> changelog.md
+          echo "**完整更新日志**: [$LATEST_TAG...${{ steps.calc_version.outputs.new_tag }}](https://github.com/${{ github.repository }}/compare/${LATEST_TAG}...${{ steps.calc_version.outputs.new_tag }})" >> changelog.md
+          
+          cat changelog.md
+
+      - name: Create and push tag
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          NEW_TAG="${{ steps.calc_version.outputs.new_tag }}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+          git push origin "$NEW_TAG"
+          
+          echo "Created and pushed tag: $NEW_TAG"
+
+      - name: Create GitHub Release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.calc_version.outputs.new_tag }}
+          name: Release ${{ steps.calc_version.outputs.new_tag }}
+          body_path: changelog.md
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+
+      - name: Summary
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          echo "## 🎉 Release Created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ steps.calc_version.outputs.new_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Type**: ${{ steps.calc_version.outputs.version_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Previous**: ${{ steps.get_latest_tag.outputs.latest_tag }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Skip message
+        if: steps.check_tag.outputs.exists == 'true'
+        run: |
+          echo "## ⏭️ Release Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Tag ${{ steps.calc_version.outputs.new_tag }} already exists." >> $GITHUB_STEP_SUMMARY
+
+  # 构建并推送 Docker 镜像（可选）
+  docker:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: release
+    if: "!startsWith(github.ref, 'refs/tags/')"
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          # 等待 tag 创建完成
+          sleep 5
+          git fetch --tags
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "latest")
+          echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.get_tag.outputs.tag }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
