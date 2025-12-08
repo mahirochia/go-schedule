@@ -1,3 +1,6 @@
+# 备选方案：使用 Alpine 基础镜像
+# 如果 distroless 不满足需求，可以使用此文件
+
 # 构建阶段
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
@@ -9,10 +12,10 @@ ARG TARGETARCH
 # 设置工作目录
 WORKDIR /app
 
-# 设置 Go 代理（加速国内下载）
+# 设置 Go 代理
 ENV GOPROXY=https://goproxy.cn,direct
 
-# 复制 go.mod 和 go.sum 文件
+# 复制依赖文件
 COPY go.mod go.sum ./
 
 # 下载依赖
@@ -21,28 +24,28 @@ RUN go mod download
 # 复制源代码
 COPY . .
 
-# 构建应用程序（交叉编译）
+# 交叉编译（避免 QEMU 问题）
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -ldflags="-s -w" -o main .
 
-# 运行阶段 - 使用 distroless 镜像（更小更安全）
-FROM gcr.io/distroless/static:nonroot
+# 运行阶段
+FROM alpine:3.20
+
+# 安装证书和时区（使用 --no-scripts 避免 QEMU 问题）
+RUN apk update && \
+    apk add --no-cache --no-scripts ca-certificates tzdata && \
+    rm -rf /var/cache/apk/*
 
 # 设置时区
 ENV TZ=Asia/Shanghai
 
 WORKDIR /app
 
-# 从构建阶段复制编译好的二进制文件
+# 复制二进制文件
 COPY --from=builder /app/main .
-
-# 复制时区数据（从 builder 阶段）
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
 # 暴露端口
 EXPOSE 3061
 
-# 使用非 root 用户运行
-USER nonroot:nonroot
+# 运行
+CMD ["./main"]
 
-# 运行应用程序
-ENTRYPOINT ["./main"]
