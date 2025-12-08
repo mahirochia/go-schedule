@@ -158,7 +158,7 @@ jobs:
             echo "go.mod 或 go.sum 需要更新"
           fi
 
-  # AI 代码审查（使用 DeepSeek API）
+  # AI 代码审查（使用 DeepSeek API - 行内评论）
   ai-review:
     name: AI Code Review (DeepSeek)
     runs-on: ubuntu-latest
@@ -171,18 +171,55 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get changed files
-        id: changed
-        run: |
-          git diff --name-only origin/${{ github.base_ref }}...HEAD > changed_files.txt
-          cat changed_files.txt
-
-      - name: Get diff content
+      - name: Get PR diff and extract changed lines
         id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git diff origin/${{ github.base_ref }}...HEAD > diff.txt
-          # 限制 diff 大小，避免超出 API 限制（DeepSeek 支持更长的上下文）
-          head -c 30000 diff.txt > diff_truncated.txt
+          # 获取 PR 的 diff
+          gh pr diff ${{ github.event.pull_request.number }} > pr_diff.txt
+          head -c 50000 pr_diff.txt > diff_truncated.txt
+          
+          # 获取变更的文件列表
+          gh pr diff ${{ github.event.pull_request.number }} --name-only > changed_files.txt
+          cat changed_files.txt
+          
+          # 解析 diff，提取每个文件的变更行号（新文件中的行号）
+          # 输出格式: file_path:line_number
+          python3 << 'EOF' > changed_lines.json
+          import re
+          import json
+
+          with open('pr_diff.txt', 'r') as f:
+              diff_content = f.read()
+
+          changed_lines = {}
+          current_file = None
+          new_line_num = 0
+
+          for line in diff_content.split('\n'):
+              # 匹配文件路径 +++ b/path/to/file
+              if line.startswith('+++ b/'):
+                  current_file = line[6:]
+                  changed_lines[current_file] = []
+              # 匹配 hunk header @@ -old_start,old_count +new_start,new_count @@
+              elif line.startswith('@@') and current_file:
+                  match = re.search(r'\+(\d+)', line)
+                  if match:
+                      new_line_num = int(match.group(1))
+              # 新增或修改的行（以 + 开头，但不是 +++ 文件头）
+              elif line.startswith('+') and not line.startswith('+++') and current_file:
+                  changed_lines[current_file].append(new_line_num)
+                  new_line_num += 1
+              # 上下文行（不以 + 或 - 开头）
+              elif not line.startswith('-') and current_file and not line.startswith('\\'):
+                  new_line_num += 1
+
+          print(json.dumps(changed_lines, indent=2))
+          EOF
+          
+          echo "Changed lines per file:"
+          cat changed_lines.json
 
       - name: Download lint results
         uses: actions/download-artifact@v4
@@ -204,6 +241,7 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           DIFF_CONTENT=$(cat diff_truncated.txt | jq -Rs .)
+          CHANGED_LINES=$(cat changed_lines.json | jq -Rs .)
           
           # 读取 lint 结果
           LINT_ISSUES=""
@@ -217,10 +255,13 @@ jobs:
             SECURITY_ISSUES=$(cat ./artifacts/security-results.json | jq -r '.Issues[]? | "- [\(.Severity)] \(.Details) at \(.File):\(.Line)"' 2>/dev/null | head -10 || echo "")
           fi
           
-          PROMPT="你是一个专业的代码审查专家，擅长 Go 和 Vue.js。请审查以下代码变更，用中文回复。
+          PROMPT="你是一个专业的代码审查专家。请审查以下 PR 代码变更。
 
           ## 代码变更 (diff):
           $DIFF_CONTENT
+
+          ## 每个文件中实际变更的行号（只能在这些行上评论）:
+          $CHANGED_LINES
 
           ## 静态分析发现的问题:
           $LINT_ISSUES
@@ -228,21 +269,25 @@ jobs:
           ## 安全扫描发现的问题:
           $SECURITY_ISSUES
 
-          请按以下格式提供审查意见：
+          请返回 JSON 格式的审查结果。格式如下：
+          {
+            \"summary\": \"总体评价（1-2句话）\",
+            \"comments\": [
+              {
+                \"path\": \"文件路径\",
+                \"line\": 行号,
+                \"type\": \"bug|optimization|security|suggestion\",
+                \"body\": \"问题描述和修复建议（中文）\"
+              }
+            ]
+          }
 
-          ### 🐛 潜在 Bug
-          (列出可能的 bug 和逻辑错误，如果没有写"未发现明显问题")
-
-          ### ⚡ 优化建议
-          (列出代码优化建议，包括性能、可读性、最佳实践)
-
-          ### 🔒 安全问题
-          (列出安全相关问题，如 SQL 注入、XSS、敏感信息泄露等，如果没有写"未发现安全问题")
-
-          ### 💡 其他建议
-          (其他改进建议，如代码结构、命名规范等)
-
-          请简洁专业地回复，每个类别最多3条最重要的建议，给出具体的代码位置和修复方案。"
+          极其重要的规则：
+          1. line 必须从上面提供的 '每个文件中实际变更的行号' 列表中选择！
+          2. 如果发现的问题所在行不在变更行列表中，选择最近的一个变更行
+          3. path 必须与变更行列表中的文件路径完全一致
+          4. 最多返回 8 条评论，优先关注严重问题
+          5. 只返回纯 JSON，不要 markdown 标记"
 
           RESPONSE=$(curl -s https://api.deepseek.com/chat/completions \
             -H "Content-Type: application/json" \
@@ -250,36 +295,206 @@ jobs:
             -d "{
               \"model\": \"deepseek-chat\",
               \"messages\": [
-                {\"role\": \"system\", \"content\": \"你是一个专业的代码审查专家，精通 Go、Vue.js、安全最佳实践。请提供具体、可操作的审查意见。不要在回复中使用代码块（反引号），直接用文字描述代码修改建议。\"},
+                {\"role\": \"system\", \"content\": \"你是代码审查专家。严格按要求返回 JSON。评论的 line 必须是用户提供的变更行列表中存在的行号。\"},
                 {\"role\": \"user\", \"content\": $(echo "$PROMPT" | jq -Rs .)}
               ],
-              \"max_tokens\": 2000,
+              \"max_tokens\": 3000,
               \"temperature\": 0.1
             }")
           
-          REVIEW=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "AI 审查暂时不可用，请检查 DEEPSEEK_API_KEY 是否配置正确"')
+          # 提取 AI 返回的内容
+          REVIEW_JSON=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "{\"summary\": \"审查失败\", \"comments\": []}"')
           
-          # 将审查结果写入文件（避免模板字符串问题）
-          echo "## 🤖 AI 代码审查报告 (DeepSeek)" > ai_review.md
-          echo "" >> ai_review.md
-          echo "$REVIEW" >> ai_review.md
-          echo "" >> ai_review.md
-          echo "---" >> ai_review.md
-          echo "*此审查由 DeepSeek AI 自动生成，仅供参考。*" >> ai_review.md
+          # 清理可能的 markdown 代码块标记
+          REVIEW_JSON=$(echo "$REVIEW_JSON" | sed 's/^```json//g' | sed 's/^```//g' | sed 's/```$//g' | tr -d '\n' | sed 's/^[[:space:]]*//')
+          
+          # 保存到文件
+          echo "$REVIEW_JSON" > ai_review.json
+          cat ai_review.json
 
-      - name: Post AI review comment
+      - name: Post inline review comments
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const body = fs.readFileSync('ai_review.md', 'utf8');
             
-            await github.rest.issues.createComment({
+            // 读取变更行信息
+            let changedLines = {};
+            try {
+              changedLines = JSON.parse(fs.readFileSync('changed_lines.json', 'utf8'));
+              console.log('Changed lines:', JSON.stringify(changedLines, null, 2));
+            } catch (e) {
+              console.log('Failed to parse changed lines:', e.message);
+            }
+            
+            let reviewData;
+            try {
+              const rawData = fs.readFileSync('ai_review.json', 'utf8');
+              console.log('Raw AI review:', rawData);
+              reviewData = JSON.parse(rawData);
+            } catch (e) {
+              console.log('Failed to parse AI review JSON:', e.message);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: '⚠️ AI 代码审查解析失败，请查看 Actions 日志。'
+              });
+              return;
+            }
+            
+            const comments = reviewData.comments || [];
+            const summary = reviewData.summary || '审查完成';
+            
+            if (comments.length === 0) {
+              // 没有问题，发送总结评论
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `## 🤖 AI 代码审查完成\n\n✅ ${summary}\n\n未发现需要关注的问题。\n\n---\n*由 DeepSeek AI 自动审查*`
+              });
+              return;
+            }
+            
+            // 获取 PR 的最新 commit SHA
+            const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: body
+              pull_number: context.issue.number
             });
+            
+            // 构建 review comments，验证行号有效性
+            const reviewComments = [];
+            const skippedComments = [];
+            const typeEmoji = {
+              'bug': '🐛 Bug',
+              'security': '🔒 安全问题',
+              'optimization': '⚡ 优化建议',
+              'suggestion': '💡 建议'
+            };
+            
+            // 辅助函数：查找最近的有效行号
+            function findNearestValidLine(path, targetLine, changedLines) {
+              const validLines = changedLines[path] || [];
+              if (validLines.length === 0) return null;
+              if (validLines.includes(targetLine)) return targetLine;
+              
+              // 找最近的行
+              let nearest = validLines[0];
+              let minDiff = Math.abs(targetLine - nearest);
+              for (const line of validLines) {
+                const diff = Math.abs(targetLine - line);
+                if (diff < minDiff) {
+                  minDiff = diff;
+                  nearest = line;
+                }
+              }
+              return nearest;
+            }
+            
+            for (const comment of comments) {
+              if (comment.path && comment.line && comment.body) {
+                const emoji = typeEmoji[comment.type] || '💬 评论';
+                const targetLine = parseInt(comment.line);
+                
+                // 验证行号是否在变更范围内
+                const validLine = findNearestValidLine(comment.path, targetLine, changedLines);
+                
+                if (validLine) {
+                  console.log(`Comment on ${comment.path}:${targetLine} -> using line ${validLine}`);
+                  reviewComments.push({
+                    path: comment.path,
+                    line: validLine,
+                    side: 'RIGHT',
+                    body: `**${emoji}**\n\n${comment.body}`
+                  });
+                } else {
+                  console.log(`Skipping comment on ${comment.path}:${targetLine} - file not in diff`);
+                  skippedComments.push(comment);
+                }
+              }
+            }
+            
+            if (reviewComments.length > 0) {
+              try {
+                // 创建 PR Review 并添加行内评论
+                await github.rest.pulls.createReview({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                  commit_id: pr.head.sha,
+                  body: `## 🤖 AI 代码审查报告\n\n${summary}\n\n共发现 **${reviewComments.length}** 个需要关注的问题，请查看下方的行内评论。\n\n---\n*由 DeepSeek AI 自动审查，修复后可点击 Resolve 标记完成*`,
+                  event: 'COMMENT',
+                  comments: reviewComments
+                });
+                console.log(`Successfully posted ${reviewComments.length} inline comments`);
+              } catch (e) {
+                console.log('Failed to create review with inline comments:', e.message);
+                console.log('Error details:', JSON.stringify(e, null, 2));
+                
+                // 尝试逐个添加评论
+                let successCount = 0;
+                for (const rc of reviewComments) {
+                  try {
+                    await github.rest.pulls.createReviewComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      pull_number: context.issue.number,
+                      commit_id: pr.head.sha,
+                      path: rc.path,
+                      line: rc.line,
+                      side: 'RIGHT',
+                      body: rc.body
+                    });
+                    successCount++;
+                    console.log(`Posted comment on ${rc.path}:${rc.line}`);
+                  } catch (innerError) {
+                    console.log(`Failed to post comment on ${rc.path}:${rc.line}:`, innerError.message);
+                  }
+                }
+                
+                if (successCount === 0) {
+                  // 完全失败，退回到普通评论
+                  let fallbackBody = `## 🤖 AI 代码审查报告\n\n${summary}\n\n`;
+                  for (const comment of comments) {
+                    const emoji = typeEmoji[comment.type] || '💬';
+                    fallbackBody += `### ${emoji} \`${comment.path}:${comment.line}\`\n${comment.body}\n\n`;
+                  }
+                  fallbackBody += `---\n*由 DeepSeek AI 自动审查*`;
+                  
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                    body: fallbackBody
+                  });
+                } else {
+                  // 部分成功，发个总结
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                    body: `## 🤖 AI 代码审查完成\n\n${summary}\n\n已添加 ${successCount} 条行内评论。\n\n---\n*由 DeepSeek AI 自动审查*`
+                  });
+                }
+              }
+            } else if (skippedComments.length > 0) {
+              // 没有有效的行内评论，但有被跳过的评论，用普通评论展示
+              let fallbackBody = `## 🤖 AI 代码审查报告\n\n${summary}\n\n`;
+              for (const comment of skippedComments) {
+                const emoji = typeEmoji[comment.type] || '💬';
+                fallbackBody += `### ${emoji} \`${comment.path}:${comment.line}\`\n${comment.body}\n\n`;
+              }
+              fallbackBody += `---\n*由 DeepSeek AI 自动审查*`;
+              
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: fallbackBody
+              });
+            }
 
   # 综合审查报告（不依赖 AI）
   review-report:
