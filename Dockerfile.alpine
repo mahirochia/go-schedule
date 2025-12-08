@@ -28,7 +28,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -ldflags="-s -w" -o main .
 
 # 运行阶段
-FROM alpine:3.20
+FROM alpine:3.23
 
 # 安装证书和时区（使用 --no-scripts 避免 QEMU 问题）
 RUN apk update && \
